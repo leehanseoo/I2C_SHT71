@@ -1,0 +1,349 @@
+#include <18f452.h>
+#include <my_register.h>
+#use delay(clock=20000000)
+#use rs232(baud=9600, parity=N, xmit=PIN_C6, rcv=PIN_C7)
+#include <stdlib.h>
+
+#bit TRIS_data = TRISC.4
+#bit TRIS_clock = TRISC.3
+#bit data_bit = PORTC.4
+#bit clock_bit = PORTC.3
+
+#define READ_TEMP 0x03
+#define READ_HUM 0x05
+
+
+//Reset Vector Address
+#build(reset=0x200)
+//Intterupts Vector Address
+#build(interrupt=0x208)
+
+//Bootloader Area
+#org 0x0000,0x01ff
+void bootloader() 
+{
+#asm  
+  nop //No Operation
+#endasm
+} 
+
+void i2c_master_setting(long baud)
+{
+   TRIS_DATA = 1; //i2c setting(TRISC.4)
+   TRIS_CLOCK = 1; //i2c setting(TRISC.3)
+   
+/*   SSPCON = 0x08;
+   SSPCON2=0x00;
+   SSPADD=(20000000/(4*baud))-1; //SSPADD=Fosc/(baud*4)-1
+   SSPSTAT=0x80; //status register setting (Standard speed mode)
+*/
+}
+
+void Send_Start_Condition() //sensor start condition
+{  
+   
+   TRIS_data = 0; //TRISC.4 output
+   TRIS_clock = 0; //TRISC.3 output
+   
+   output_float(data_bit);  //data_bit high
+   
+   clock_bit = 1; //SCL=0->1 (SDA=1)
+   delay_us(1);
+   
+   data_bit = 0; //SDA=1->0 (SCL=1) **
+   delay_us(1);
+   
+   clock_bit = 0; //SCL=1->0 (SDA=0)
+   delay_us(1);
+   
+   clock_bit = 1; //SCL=0->1 (SDA=0)
+   delay_us(1);
+   
+   output_float(data_bit);  //data_bit high
+   delay_us(1);
+   
+   clock_bit = 0;
+   delay_us(1);
+}
+
+void Send_Reset()
+{
+   int i;
+   TRIS_data = 0;
+   
+   output_float(data_bit);  //data_bit high
+   
+   for(i=0;i<9;i++)
+   {
+      clock_bit = 1;
+      delay_us(1);
+      clock_bit = 0;
+      delay_us(1);
+   }
+   
+   Send_Start_Condition();
+}
+
+short write_data(unsigned char address)
+{
+   int i, mask = 0x80; //1000 0000 it is going to shift 1 bit >>
+   short ack;
+   
+   for(i=0; i<8; i++)
+   {
+      clock_bit = 0;
+      
+      if((address & mask) > 0)
+      {
+         output_float(data_bit);  //data_bit high
+      }
+      else
+      {
+         data_bit = 0;
+      }
+      
+      delay_us(1);
+      clock_bit = 1;
+      delay_us(1);
+      mask = mask >> 1;
+   }
+   TRIS_data = 1; //TRISC.4 input
+   
+   clock_bit = 0;
+   delay_us(1);
+   ack = data_bit;   //get ack     
+   clock_bit = 1;
+   delay_us(2); 
+   clock_bit = 0;
+   
+   return ack;
+}
+
+int16 read_data()
+{
+   int i;
+   unsigned char MSB = 0x00, LSB = 0x00, MASK = 0x01;
+   unsigned long data;
+   
+   
+   
+   TRIS_data = 1; //TRISC.4 input  
+//get MSB   
+   for(i=0;i<8;i++)
+   {
+      MSB = MSB << 1;
+      clock_bit = 1;
+      delay_us(1);
+      if(data_bit == 1)  //if data_bit 1, MSB lowest bit is set
+      {
+         MSB |= MASK;
+      }
+      else
+      {
+         MSB |= 0;
+      }
+      
+      clock_bit = 0;
+      delay_us(1);
+   }
+   //send ack 0 bit
+   tris_data = 0;
+   
+   data_bit = 0; //data low
+   delay_us(1);
+   clock_bit = 1;  //clk high
+   delay_us(2);
+   clock_bit = 0;  //clk low
+   delay_us(1);
+
+   PORTD= msb;
+ //get LSB   
+   MASK = 0x80;
+   
+   for(i=0;i<8;i++)
+   {
+      clock_bit = 1;
+      delay_us(1);
+      if(data_bit == 1)  //if data_bit 1, MSB lowest bit is set
+      {
+         LSB = (LSB|MASK);
+      }
+      MASK = mask >> 1;
+      clock_bit = 0;
+      delay_us(1);
+      
+
+   }
+  
+   //send ack 0 bit
+   output_float(data_bit);  //data_bit high
+   delay_us(1);
+   clock_bit = 1;  //clk high
+   delay_us(2);
+   clock_bit = 0;  //clk low
+   
+   
+   data=(int16)((MSB&0xff)*0x100 + (LSB&0xff));
+   
+   return data;
+}
+
+void data_ready()
+{
+    
+   TRIS_data = 1; //TRISC.4 input
+   delay_us(1);
+   
+   while(data_bit);
+}
+
+unsigned char measure_temp (void)
+{
+   int ack;
+   unsigned char data;
+  
+   Send_reset(); //start 
+   delay_us(2);
+   ack = write_data(0x03);
+
+   if (ack == 0)  // not ack -> break
+   {
+      data_ready(); //wait data_ready
+      data = read_data();
+//      PORTD = 0x01;     
+      return data;  
+   }
+   else
+   {
+      portd = 0x02;
+      
+   }
+}
+
+void I2CACK(void)
+{
+  ACKDT = 0; // 0 -> ACK
+  ACKEN = 1; // Send ACK
+}
+
+void I2CNACK(void)
+{
+  ACKDT = 1; // 1 -> NACK
+  ACKEN = 1; // Send NACK
+}
+
+
+void main()
+{
+   float Temperature;
+   
+   TRISD = 0X00;
+   PORTD = 0X00;
+   unsigned char data;
+
+   data = measure_temp ();
+   
+   printf("data : %s", data);
+   
+   Temperature = ((float)data*0.01)-40.0;
+   
+   printf("Temperature = %3.4f\n\r", Temperature);
+}
+
+
+
+
+/*
+void master_start_condition() //i2c start condition
+{
+   TRIS_DATA = 1; //i2c setting(TRISC.4)
+   TRIS_CLOCK = 1; //i2c setting(TRISC.3)
+   SSPEN=1;
+   
+   SEN=1; //inite I2C START condition
+   while(!SSPIF);
+   SSPIF=0;
+}
+void master_stop_condition()
+{
+   SSPEN=1;
+   PEN=1;
+   while(!SSPIF);
+   SSPIF=0;
+   PORTD=0xCC;
+}
+
+long delay;
+long bufHigh=0x00, bufLow=0x00;
+long buf=0;
+long measure_XXX(unsigned char command)
+{
+   //send START condition
+   send_start_condition(); //START
+   
+   //Master START condition
+   master_start_condition();
+
+   //send command to sensor
+   send_address(command); //command = measure Temperature
+   
+   
+   ////high byte////
+   RCEN=1; //start receiver
+   
+   while(data_bit); //the controller must wait for "data ready" signal
+   PORTD=0xee;
+   
+   SSPEN=1; //SCL on
+   while(!BF); //last bit shifted into SSPBUF and contents are unloaded into SSPBUF
+   while(!SSPIF);
+   SSPEN=0;
+   SSPIF=0;
+   SSPEN=1;
+   I2CACK(); //send ACK
+   while(!SSPIF);
+   SSPEN=0;
+   PORTD=0xcc;
+   SSPIF=0;
+   bufHigh = SSPBUF; //read data high 8bit
+   
+   
+   
+   //SSPEN=0; //wait for read
+   //
+   /*
+   RCEN=1; //Master configured as a receiver
+   ////low byte////
+   //
+   SSPEN=1; //SCL on
+   while(!BF);
+   PORTD=0x01;
+   SSPEN=0;
+   SSPIF=0;
+   SSPEN=1;
+   I2CNACK(); //(send NACK)STOP   ** NACK = sensor STOP condition
+   while(!SSPIF);
+   SSPEN=0;
+   SSPIF=0;
+   while(!SSPIF);
+   
+   bufLow = SSPBUF; //read data low 8bit
+   SSPEN=0; //wait for read
+   //
+   SSPIF=0;
+
+   printf("%lu\n\r",bufHigh);
+   //printf("%lu\n\r",bufLow);
+   
+   
+   PORTD=0xDD;
+
+   master_stop_condition();
+   
+   ////high byte + low byte////
+   buf=(int16)(bufHigh&0xff)*0x100+(bufLow&0xff);
+   
+   return buf;
+}
+
+*/
